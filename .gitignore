@@ -1,0 +1,9 @@
+node_modules/
+scratch/
+.env
+.env.local
+utmod
+utmod.exe
+*.log
+.bun/
+bun.lockb

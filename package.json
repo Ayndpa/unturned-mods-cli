@@ -1,0 +1,23 @@
+{
+  "name": "utmod-cli",
+  "version": "1.0.0",
+  "description": "CLI to login and manage mods on Unturned Mods Hub",
+  "main": "src/index.ts",
+  "type": "module",
+  "bin": {
+    "utmod": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "cli-table3": "^0.6.5",
+    "commander": "^12.1.0",
+    "ora": "^8.0.1",
+    "picocolors": "^1.0.1",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/prompts": "^2.4.9"
+  }
+}
