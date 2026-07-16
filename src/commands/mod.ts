@@ -16,6 +16,11 @@ import {
   trimMap,
   type LocalizedString,
 } from "../utils/localized";
+import {
+  coerceModTags,
+  mergeTagFieldsByLang,
+  tagsEqual,
+} from "../utils/tags";
 
 // Resolve a --body flag value: if it points to an existing file, read its contents;
 // otherwise treat the value as literal markdown content.
@@ -133,7 +138,10 @@ export async function viewMod(id: string) {
     console.log(`${pc.bold("Updated:")}     ${new Date(mod.updated_at * 1000).toLocaleString()}`);
     
     if (mod.tags && mod.tags.length > 0) {
-      console.log(`${pc.bold("Tags:")}        ${mod.tags.map((t: string) => pc.blue(t)).join(", ")}`);
+      const tagLine = coerceModTags(mod.tags)
+        .map((t) => pickLocalized(t))
+        .join(", ");
+      console.log(`${pc.bold("Tags:")}        ${tagLine.split(", ").map((s) => pc.blue(s)).join(", ")}`);
     }
     
     if (mod.dependencies && mod.dependencies.length > 0) {
@@ -173,9 +181,29 @@ type LocalizedCreateOptions = {
   file?: string;
   cover?: string;
   tags?: string;
+  tagsZh?: string;
+  tagsEn?: string;
+  tagsJson?: string;
   dependencies?: string;
   yes?: boolean;
 };
+
+function buildTagsFromOptions(options: LocalizedCreateOptions): LocalizedString[] | undefined {
+  if (options.tagsJson) {
+    if (!existsSync(options.tagsJson)) {
+      console.log(pc.red(`Error: tags JSON file not found: ${options.tagsJson}`));
+      process.exit(1);
+    }
+    const parsed = JSON.parse(readFileSync(options.tagsJson, "utf-8"));
+    return coerceModTags(parsed);
+  }
+  const fields: Record<string, string> = {};
+  if (options.tagsZh !== undefined) fields.zh = options.tagsZh;
+  if (options.tagsEn !== undefined) fields.en = options.tagsEn;
+  if (options.tags !== undefined && Object.keys(fields).length === 0) fields.zh = options.tags;
+  if (Object.keys(fields).length === 0) return undefined;
+  return mergeTagFieldsByLang(fields);
+}
 
 export async function createMod(options: LocalizedCreateOptions) {
   await requireAuth();
@@ -197,7 +225,8 @@ export async function createMod(options: LocalizedCreateOptions) {
   let version = options.version ?? "1.0.0";
   let filePath = options.file ?? "";
   let coverPath = options.cover ?? "";
-  let tags = options.tags ?? "";
+  const tagsFromOpts = buildTagsFromOptions(options);
+  let tagsList: LocalizedString[] = tagsFromOpts ?? [];
   let dependencies = options.dependencies ?? "";
   const isYes = options.yes ?? false;
 
@@ -258,8 +287,13 @@ export async function createMod(options: LocalizedCreateOptions) {
       );
     }
   }
-  if (options.tags === undefined && !isYes) {
-    tags = await askText("Tags (comma separated, e.g. weapon,tactical):");
+  if (options.tags === undefined && options.tagsZh === undefined && options.tagsEn === undefined && !isYes) {
+    const tZh = await askText("Tags (zh, comma separated):");
+    const tEn = await askText("Tags (en, comma separated, optional):");
+    tagsList = mergeTagFieldsByLang({
+      ...(tZh.trim() ? { zh: tZh } : {}),
+      ...(tEn.trim() ? { en: tEn } : {}),
+    });
   }
   if (options.dependencies === undefined && !isYes) {
     dependencies = await askText("Dependencies (comma separated mod IDs, e.g. 5,12):");
@@ -315,7 +349,7 @@ export async function createMod(options: LocalizedCreateOptions) {
       body: Object.keys(cleanBody).length ? cleanBody : undefined,
       category,
       version,
-      tags,
+      tags: tagsList.length ? tagsList : undefined,
       dependencies,
       cover_url: coverUrl,
       file_url: fileUrl,
@@ -338,7 +372,7 @@ export async function createMod(options: LocalizedCreateOptions) {
       appendLocalizedFormData(formData, "body", cleanBody);
       formData.append("category", category);
       formData.append("version", version);
-      formData.append("tags", tags);
+      if (tagsList.length) formData.append("tags", JSON.stringify(tagsList));
       formData.append("dependencies", dependencies);
       if (coverUrl) formData.append("cover_url", coverUrl);
       formData.append("mod_file", Bun.file(filePath), basename(filePath));
@@ -395,11 +429,12 @@ export async function updateMod(id: string, options: LocalizedCreateOptions) {
   let version = options.version;
   let filePath = options.file;
   let coverPath = options.cover;
-  let tags = options.tags;
+  let tagsPatch: LocalizedString[] | undefined = buildTagsFromOptions(options);
   let dependencies = options.dependencies;
   const isYes = options.yes ?? false;
 
-  const interactive = !isYes && !Object.keys(options).some(k => ["title", "description", "body", "category", "version", "file", "cover", "tags", "dependencies"].includes(k));
+  const interactive = !isYes && !Object.keys(options).some(k =>
+    ["title", "description", "body", "category", "version", "file", "cover", "tags", "tagsZh", "tagsEn", "tagsJson", "dependencies"].includes(k));
 
   let descPatchMerged = { ...currentDescMap };
   let bodyPatchMerged = { ...currentBodyMap };
@@ -452,11 +487,22 @@ export async function updateMod(id: string, options: LocalizedCreateOptions) {
       );
     }
 
-    const currentTagsStr = currentMod.tags ? currentMod.tags.join(",") : "";
-    tags = await askText(`Tags (${currentTagsStr || "none"}):`) || currentTagsStr;
+    const currTags = coerceModTags(currentMod.tags);
+    const tagsZhInput = await askText(`Tags zh (${currTags.map(t => pickLocalized(t, "zh")).filter(Boolean).join(", ") || "none"}):`);
+    const tagsEnInput = await askText(`Tags en (${currTags.map(t => pickLocalized(t, "en")).filter(Boolean).join(", ") || "none"}):`);
+    if (tagsZhInput.trim() || tagsEnInput.trim()) {
+      tagsPatch = mergeTagFieldsByLang({
+        ...(tagsZhInput.trim() ? { zh: tagsZhInput } : {}),
+        ...(tagsEnInput.trim() ? { en: tagsEnInput } : {}),
+      });
+    }
 
     const currentDepsStr = currentMod.dependencies ? currentMod.dependencies.map((d: any) => d.id).join(",") : "";
     dependencies = await askText(`Dependencies (${currentDepsStr || "none"}):`) || currentDepsStr;
+  } else {
+    // Non-interactive (-y): apply CLI language patches (interactive path merges via prompts).
+    descPatchMerged = mergeLocalized(currentDescMap, descPatch);
+    bodyPatchMerged = mergeLocalized(currentBodyMap, bodyPatch);
   }
 
   const nextTitle = mergeLocalized(currentTitleMap, titlePatch);
@@ -481,12 +527,12 @@ export async function updateMod(id: string, options: LocalizedCreateOptions) {
   }
   if (category !== undefined && category !== currentMod.category) updates.category = category;
   if (version !== undefined && version !== currentMod.version) updates.version = version;
-  if (tags !== undefined) {
-    const nextTags = tags.split(",").map(t => t.trim().toLowerCase()).filter(Boolean);
-    const currTags = currentMod.tags || [];
-    if (nextTags.join(",") !== currTags.join(",")) {
-      updates.tags = tags;
-    }
+  const hasTagsPatch =
+    options.tags !== undefined || options.tagsZh !== undefined ||
+    options.tagsEn !== undefined || options.tagsJson !== undefined;
+  if (hasTagsPatch && tagsPatch !== undefined) {
+    const currTags = coerceModTags(currentMod.tags);
+    if (!tagsEqual(tagsPatch, currTags)) updates.tags = tagsPatch;
   }
   if (dependencies !== undefined) {
     const nextDeps = dependencies.split(",").map(d => parseInt(d.trim(), 10)).filter(d => !isNaN(d));

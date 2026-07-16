@@ -59,7 +59,10 @@ mod
   .option("--version <version>", "Initial version")
   .option("--file <zipPath>", "Path to mod ZIP file")
   .option("--cover <coverPath>", "Path to cover image")
-  .option("--tags <tags>", "Comma separated tags")
+  .option("--tags <tags>", "Comma separated tags (legacy: default language)")
+  .option("--tags-zh <tags>", "Tags (Chinese, comma separated)")
+  .option("--tags-en <tags>", "Tags (English, comma separated)")
+  .option("--tags-json <path>", "Tags as JSON array of {zh,en} objects")
   .option("--dependencies <ids>", "Comma separated dependency mod IDs")
   .option("-y, --yes", "Skip interactive prompts and confirmation")
   .action(createMod);
@@ -80,7 +83,10 @@ mod
   .option("--version <version>", "New version string")
   .option("--file <zipPath>", "Path to new mod ZIP file")
   .option("--cover <coverPath>", "Path to new cover image")
-  .option("--tags <tags>", "New tags (comma separated)")
+  .option("--tags <tags>", "New tags (comma separated, legacy: zh)")
+  .option("--tags-zh <tags>", "New tags (Chinese)")
+  .option("--tags-en <tags>", "New tags (English)")
+  .option("--tags-json <path>", "Replace tags from JSON file")
   .option("--dependencies <ids>", "New dependency mod IDs (comma separated)")
   .option("-y, --yes", "Skip interactive prompts and confirmation")
   .action(updateMod);
