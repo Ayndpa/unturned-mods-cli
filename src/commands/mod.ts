@@ -6,6 +6,16 @@ import { existsSync, readFileSync } from "fs";
 import { basename } from "path";
 import pc from "picocolors";
 import ora from "ora";
+import {
+  appendLocalizedFormData,
+  buildLocalized,
+  localizedEqual,
+  mergeLocalized,
+  pickLocalized,
+  toLocalizedMap,
+  trimMap,
+  type LocalizedString,
+} from "../utils/localized";
 
 // Resolve a --body flag value: if it points to an existing file, read its contents;
 // otherwise treat the value as literal markdown content.
@@ -69,7 +79,7 @@ export async function listMods() {
     for (const mod of data.mods) {
       table.push([
         mod.id,
-        pc.cyan(mod.title),
+        pc.cyan(pickLocalized(mod.title)),
         mod.category,
         mod.version,
         formatStatus(mod.status, mod.reject_reason),
@@ -105,7 +115,13 @@ export async function viewMod(id: string) {
     }
 
     const mod = data.mod;
-    console.log("\n" + pc.bold(pc.underline(`Mod #${mod.id}: ${mod.title}`)));
+    const titleLine = pickLocalized(mod.title);
+    console.log("\n" + pc.bold(pc.underline(`Mod #${mod.id}: ${titleLine}`)));
+    if (typeof mod.title === "object" && mod.title) {
+      for (const [lang, val] of Object.entries(mod.title)) {
+        if (val?.trim()) console.log(`  ${pc.dim(`Title (${lang}):`)} ${val}`);
+      }
+    }
     console.log(`${pc.bold("Author:")}      ${mod.author_name}`);
     console.log(`${pc.bold("Category:")}    ${mod.category}`);
     console.log(`${pc.bold("Version:")}     ${mod.version}`);
@@ -121,17 +137,19 @@ export async function viewMod(id: string) {
     }
     
     if (mod.dependencies && mod.dependencies.length > 0) {
-      console.log(`${pc.bold("Dependencies:")} ${mod.dependencies.map((d: any) => `${d.title} (v${d.version}, #${d.id})`).join(", ")}`);
+      console.log(`${pc.bold("Dependencies:")} ${mod.dependencies.map((d: any) => `${pickLocalized(d.title)} (v${d.version}, #${d.id})`).join(", ")}`);
     }
 
-    if (mod.description) {
-      console.log(`\n${pc.bold("Description:")}\n${pc.italic(mod.description)}`);
+    const descText = pickLocalized(mod.description);
+    if (descText) {
+      console.log(`\n${pc.bold("Description:")}\n${pc.italic(descText)}`);
     }
 
-    if (mod.body) {
+    const bodyText = pickLocalized(mod.body);
+    if (bodyText) {
       console.log(`\n${pc.bold("Body (Markdown):")}`);
       console.log(pc.dim("--------------------------------------------------"));
-      console.log(mod.body);
+      console.log(bodyText);
       console.log(pc.dim("--------------------------------------------------"));
     }
     console.log();
@@ -140,10 +158,16 @@ export async function viewMod(id: string) {
   }
 }
 
-export async function createMod(options: {
+type LocalizedCreateOptions = {
   title?: string;
+  titleZh?: string;
+  titleEn?: string;
   description?: string;
+  descZh?: string;
+  descEn?: string;
   body?: string;
+  bodyZh?: string;
+  bodyEn?: string;
   category?: string;
   version?: string;
   file?: string;
@@ -151,13 +175,24 @@ export async function createMod(options: {
   tags?: string;
   dependencies?: string;
   yes?: boolean;
-}) {
+};
+
+export async function createMod(options: LocalizedCreateOptions) {
   await requireAuth();
   const categories = await fetchCategoryChoices();
 
-  let title = options.title ?? "";
-  let description = options.description ?? "";
-  let bodyContent = resolveBody(options.body);
+  let titleMap = buildLocalized(options.title, {
+    zh: options.titleZh,
+    en: options.titleEn,
+  });
+  let descMap = buildLocalized(options.description, {
+    zh: options.descZh,
+    en: options.descEn,
+  });
+  let bodyMap = buildLocalized(options.body, {
+    zh: options.bodyZh,
+    en: options.bodyEn,
+  }, resolveBody);
   let category = options.category ?? "";
   let version = options.version ?? "1.0.0";
   let filePath = options.file ?? "";
@@ -167,17 +202,19 @@ export async function createMod(options: {
   const isYes = options.yes ?? false;
 
   // Interactive Prompts if not supplied via flags and not running with -y/--yes
-  if (!title) {
+  if (Object.keys(titleMap).length === 0) {
     if (isYes) {
       console.log(pc.red("Error: Title is required for non-interactive mod creation."));
       process.exit(1);
     }
-    title = await askText("Mod Title:", "", (val) => (val.trim() ? true : "Title is required"));
+    const t = await askText("Mod Title (zh):", "", (val) => (val.trim() ? true : "Title is required"));
+    titleMap = { zh: t.trim() };
   }
-  if (options.description === undefined && !isYes) {
-    description = await askText("Description (brief summary):");
+  if (!options.description && !options.descZh && !options.descEn && !isYes) {
+    const d = await askText("Description (brief summary, zh):");
+    if (d.trim()) descMap = { zh: d.trim() };
   }
-  if (options.body === undefined && !isYes) {
+  if (!options.body && !options.bodyZh && !options.bodyEn && !isYes) {
     const bodySource = await askSelect("How would you like to provide the body content (markdown)?", [
       { title: "Write here in terminal", value: "terminal" },
       { title: "Read from a local file", value: "file" },
@@ -185,12 +222,13 @@ export async function createMod(options: {
     ]);
 
     if (bodySource === "terminal") {
-      bodyContent = await askText("Enter body content:");
+      const b = await askText("Enter body content:");
+      if (b.trim()) bodyMap = { zh: b.trim() };
     } else if (bodySource === "file") {
       const path = await askText("Enter path to markdown file:", "", (val) =>
         existsSync(val) ? true : `File not found: ${val}`
       );
-      bodyContent = readFileSync(path, "utf-8");
+      bodyMap = { zh: readFileSync(path, "utf-8").trim() };
     }
   }
   if (!category) {
@@ -227,10 +265,18 @@ export async function createMod(options: {
     dependencies = await askText("Dependencies (comma separated mod IDs, e.g. 5,12):");
   }
 
+  const cleanTitle = trimMap(titleMap);
+  const cleanDesc = trimMap(descMap);
+  const cleanBody = trimMap(bodyMap);
+  if (Object.values(cleanTitle).every(v => !v)) {
+    console.log(pc.red("Error: Title is required in at least one language."));
+    process.exit(1);
+  }
+
   // Confirm creation
   if (!isYes) {
     console.log(`\n${pc.bold("Mod Upload Review:")}`);
-    console.log(`Title:       ${pc.cyan(title)}`);
+    console.log(`Title:       ${pc.cyan(JSON.stringify(cleanTitle))}`);
     console.log(`Category:    ${pc.cyan(category)}`);
     console.log(`Version:     ${pc.cyan(version)}`);
     console.log(`Mod File:    ${pc.cyan(filePath)}`);
@@ -263,10 +309,10 @@ export async function createMod(options: {
     //    Try JSON first (production), fall back to multipart (local dev).
     spinner.text = "Creating mod entry...";
 
-    const payload: Record<string, string | number | null> = {
-      title,
-      description,
-      body: bodyContent,
+    const payload: Record<string, unknown> = {
+      title: cleanTitle,
+      description: Object.keys(cleanDesc).length ? cleanDesc : undefined,
+      body: Object.keys(cleanBody).length ? cleanBody : undefined,
       category,
       version,
       tags,
@@ -287,9 +333,9 @@ export async function createMod(options: {
     } catch (jsonErr: any) {
       // JSON path rejected (local dev only accepts multipart) -> fall back.
       const formData = new FormData();
-      formData.append("title", title);
-      formData.append("description", description);
-      formData.append("body", bodyContent);
+      appendLocalizedFormData(formData, "title", cleanTitle);
+      appendLocalizedFormData(formData, "description", cleanDesc);
+      appendLocalizedFormData(formData, "body", cleanBody);
       formData.append("category", category);
       formData.append("version", version);
       formData.append("tags", tags);
@@ -312,18 +358,7 @@ export async function createMod(options: {
   }
 }
 
-export async function updateMod(id: string, options: {
-  title?: string;
-  description?: string;
-  body?: string;
-  category?: string;
-  version?: string;
-  file?: string;
-  cover?: string;
-  tags?: string;
-  dependencies?: string;
-  yes?: boolean;
-}) {
+export async function updateMod(id: string, options: LocalizedCreateOptions) {
   await requireAuth();
   const modId = parseInt(id, 10);
   if (isNaN(modId)) {
@@ -348,9 +383,14 @@ export async function updateMod(id: string, options: {
 
   const categories = await fetchCategoryChoices();
 
-  let title = options.title;
-  let description = options.description;
-  let bodyContent = resolveBody(options.body);
+  const currentTitleMap = toLocalizedMap(currentMod.title);
+  const currentDescMap = toLocalizedMap(currentMod.description);
+  const currentBodyMap = toLocalizedMap(currentMod.body);
+
+  const titlePatch = buildLocalized(options.title, { zh: options.titleZh, en: options.titleEn });
+  const descPatch = buildLocalized(options.description, { zh: options.descZh, en: options.descEn });
+  const bodyPatch = buildLocalized(options.body, { zh: options.bodyZh, en: options.bodyEn }, resolveBody);
+
   let category = options.category;
   let version = options.version;
   let filePath = options.file;
@@ -361,12 +401,17 @@ export async function updateMod(id: string, options: {
 
   const interactive = !isYes && !Object.keys(options).some(k => ["title", "description", "body", "category", "version", "file", "cover", "tags", "dependencies"].includes(k));
 
+  let descPatchMerged = { ...currentDescMap };
+  let bodyPatchMerged = { ...currentBodyMap };
+
   if (interactive) {
     console.log(pc.bold(`\nEditing Mod #${currentMod.id} (Leave blank to keep current value):`));
-    
-    title = await askText(`Title (${currentMod.title}):`) || currentMod.title;
-    description = await askText(`Description (${currentMod.description || "none"}):`) || currentMod.description;
-    
+
+    const tZh = await askText(`Title zh (${pickLocalized(currentMod.title, "zh") || "none"}):`);
+    if (tZh.trim()) titlePatch.zh = tZh.trim();
+    const d = await askText(`Description zh (${pickLocalized(currentMod.description, "zh") || "none"}):`);
+    if (d.trim()) descPatchMerged.zh = d.trim();
+
     const editBody = await askConfirm("Do you want to edit the body text?", false);
     if (editBody) {
       const bodySource = await askSelect("How would you like to provide the body content?", [
@@ -374,15 +419,14 @@ export async function updateMod(id: string, options: {
         { title: "Read from a local file", value: "file" },
       ]);
       if (bodySource === "terminal") {
-        bodyContent = await askText("Enter body content:");
+        const b = await askText("Enter body content:");
+        if (b.trim()) bodyPatchMerged = { zh: b.trim() };
       } else {
         const path = await askText("Enter path to markdown file:", "", (val) =>
           existsSync(val) ? true : `File not found: ${val}`
         );
-        bodyContent = readFileSync(path, "utf-8");
+        bodyPatchMerged = { zh: readFileSync(path, "utf-8").trim() };
       }
-    } else {
-      bodyContent = currentMod.body;
     }
 
     const editCat = await askConfirm(`Change category from "${currentMod.category}"?`, false);
@@ -415,11 +459,26 @@ export async function updateMod(id: string, options: {
     dependencies = await askText(`Dependencies (${currentDepsStr || "none"}):`) || currentDepsStr;
   }
 
+  const nextTitle = mergeLocalized(currentTitleMap, titlePatch);
+  const nextDesc = mergeLocalized(currentDescMap, descPatchMerged);
+  const nextBody = mergeLocalized(currentBodyMap, bodyPatchMerged);
+
+  const hasTitlePatch =
+    options.title !== undefined || options.titleZh !== undefined || options.titleEn !== undefined;
+  const hasDescPatch =
+    options.description !== undefined || options.descZh !== undefined || options.descEn !== undefined;
+  const hasBodyPatch =
+    options.body !== undefined || options.bodyZh !== undefined || options.bodyEn !== undefined;
+
   // Build the updates object
   const updates: any = {};
-  if (title !== undefined && title !== currentMod.title) updates.title = title;
-  if (description !== undefined && description !== currentMod.description) updates.description = description;
-  if (bodyContent !== undefined && bodyContent !== currentMod.body) updates.body = bodyContent;
+  if (hasTitlePatch && !localizedEqual(nextTitle, currentTitleMap)) updates.title = nextTitle;
+  if (hasDescPatch && !localizedEqual(nextDesc, currentDescMap)) {
+    updates.description = Object.keys(trimMap(nextDesc)).length ? trimMap(nextDesc) : {};
+  }
+  if (hasBodyPatch && !localizedEqual(nextBody, currentBodyMap)) {
+    updates.body = Object.keys(trimMap(nextBody)).length ? trimMap(nextBody) : {};
+  }
   if (category !== undefined && category !== currentMod.category) updates.category = category;
   if (version !== undefined && version !== currentMod.version) updates.version = version;
   if (tags !== undefined) {
