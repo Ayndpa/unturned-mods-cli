@@ -7,6 +7,16 @@ import { basename } from "path";
 import pc from "picocolors";
 import ora from "ora";
 
+// Resolve a --body flag value: if it points to an existing file, read its contents;
+// otherwise treat the value as literal markdown content.
+function resolveBody(value: string | undefined): string {
+  if (!value) return "";
+  if (existsSync(value) && !value.includes("\n")) {
+    return readFileSync(value, "utf-8");
+  }
+  return value;
+}
+
 // Check authentication status and exit if not authenticated
 async function requireAuth() {
   const config = await loadConfig();
@@ -147,7 +157,7 @@ export async function createMod(options: {
 
   let title = options.title ?? "";
   let description = options.description ?? "";
-  let bodyContent = options.body ?? "";
+  let bodyContent = resolveBody(options.body);
   let category = options.category ?? "";
   let version = options.version ?? "1.0.0";
   let filePath = options.file ?? "";
@@ -236,35 +246,61 @@ export async function createMod(options: {
   const spinner = ora("Preparing upload...").start();
 
   try {
-    let coverUrl = null;
+    // 1. Upload cover image (if any) -> public URL.
+    let coverUrl: string | null = null;
     if (coverPath) {
       spinner.text = `Uploading cover image: ${basename(coverPath)}...`;
       coverUrl = await uploadCover(coverPath);
     }
 
-    spinner.text = `Uploading mod ZIP and creating entry: ${basename(filePath)}...`;
-    
-    const formData = new FormData();
-    formData.append("title", title);
-    formData.append("description", description);
-    formData.append("body", bodyContent);
-    formData.append("category", category);
-    formData.append("version", version);
-    formData.append("tags", tags);
-    formData.append("dependencies", dependencies);
-    if (coverUrl) {
-      formData.append("cover_url", coverUrl);
+    // 2. Upload the mod package -> { url, size }. (Handles both presign/remote
+    //    and multipart/local flows internally.)
+    spinner.text = `Uploading mod file: ${basename(filePath)}...`;
+    const { url: fileUrl, size: fileSize } = await uploadModFile(filePath);
+
+    // 3. Create the mod entry. Production (/api/upload/mod via Cloudflare Worker)
+    //    expects JSON with file_url + file_size; local dev expects multipart form.
+    //    Try JSON first (production), fall back to multipart (local dev).
+    spinner.text = "Creating mod entry...";
+
+    const payload: Record<string, string | number | null> = {
+      title,
+      description,
+      body: bodyContent,
+      category,
+      version,
+      tags,
+      dependencies,
+      cover_url: coverUrl,
+      file_url: fileUrl,
+      file_size: fileSize,
+    };
+
+    let data: any = null;
+    try {
+      const res = await request("/api/upload/mod", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      data = await res.json();
+    } catch (jsonErr: any) {
+      // JSON path rejected (local dev only accepts multipart) -> fall back.
+      const formData = new FormData();
+      formData.append("title", title);
+      formData.append("description", description);
+      formData.append("body", bodyContent);
+      formData.append("category", category);
+      formData.append("version", version);
+      formData.append("tags", tags);
+      formData.append("dependencies", dependencies);
+      if (coverUrl) formData.append("cover_url", coverUrl);
+      formData.append("mod_file", Bun.file(filePath), basename(filePath));
+
+      const res = await request("/api/upload/mod", { method: "POST", body: formData });
+      data = await res.json();
     }
-    
-    // Add ZIP file
-    formData.append("mod_file", Bun.file(filePath), basename(filePath));
 
-    const res = await request("/api/upload/mod", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await res.json();
     if (data?.ok && data?.mod_id) {
       spinner.succeed(`Mod created successfully! Mod ID: ${pc.green(data.mod_id)}`);
       console.log(`Your mod is now ${pc.yellow("Pending Approval")} by moderators.`);
@@ -314,7 +350,7 @@ export async function updateMod(id: string, options: {
 
   let title = options.title;
   let description = options.description;
-  let bodyContent = options.body;
+  let bodyContent = resolveBody(options.body);
   let category = options.category;
   let version = options.version;
   let filePath = options.file;
